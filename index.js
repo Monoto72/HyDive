@@ -43,6 +43,7 @@ app.get('/auctions/items', (req, res) => {
     res.json(allItems);
 });
 
+
 /**
  * GET /auctions/items/:itemName
  * Query parameters: attributes
@@ -110,6 +111,19 @@ app.get('/auctions/lowestbin', (req, res) => {
         return res.status(404).json({ error: 'No lowest BIN auctions found' });
     }
     res.json(lowestBins);
+});
+
+/**
+ * GET /auctions/median/:itemName
+ * Returns q1, median, and iqr for the given item.
+ */
+app.get('/auctions/median/:itemName', (req, res) => {
+    const { itemName } = req.params;
+    const stats = endedManager.computeStats(itemName);
+    if (!stats || stats.median === null) {
+        return res.status(404).json({ error: `No median stats found for ${itemName}` });
+    }
+    res.json({ item: itemName, stats: [stats.q1, stats.median, stats.iqr] });
 });
 
 /**

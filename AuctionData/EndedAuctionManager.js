@@ -93,4 +93,63 @@ export class EndedAuctionManager extends AuctionManagerBase {
         return averages;
     }
     
+    quickSelect(arr, k) {
+        if (arr.length === 1) {
+            return arr[0];
+        }
+        const pivot = arr[Math.floor(Math.random() * arr.length)];
+        const lows = arr.filter(el => el < pivot);
+        const highs = arr.filter(el => el > pivot);
+        const pivots = arr.filter(el => el === pivot);
+
+        if (k < lows.length) {
+            return this.quickSelect(lows, k);
+        } else if (k < lows.length + pivots.length) {
+            return pivot; // k is within the range of pivot values
+        } else {
+            return this.quickSelect(highs, k - lows.length - pivots.length);
+        }
+    }
+
+    computeQuantile(arr, quantile) {
+        const n = arr.length;
+        const pos = (n - 1) * quantile;
+        const base = Math.floor(pos);
+        const rest = pos - base;
+        const lower = this.quickSelect(arr.slice(), base);
+        if (rest === 0) {
+            return lower;
+        }
+        const upper = this.quickSelect(arr.slice(), base + 1);
+        return lower + rest * (upper - lower);
+    }
+
+    computeStats(itemName, minResults = 5) {
+        const auctions = this.rawStorage.getAuctions(itemName);
+        if (!auctions) return { median: null, iqr: null, q1: null };
+
+        let prices = [];
+        if (!Array.isArray(auctions)) {
+            for (const bucket of Object.values(auctions)) {
+                for (const a of bucket) {
+                    if (a.auctionRecord && a.auctionRecord.price) {
+                        prices.push(a.auctionRecord.price);
+                    } else if (a.price) {
+                        prices.push(a.price);
+                    }
+                }
+            }
+        } else {
+            prices = auctions.map(a => (a.auctionRecord && a.auctionRecord.price) ? a.auctionRecord.price : a.price);
+        }
+        
+        if (prices.length < minResults) return { median: null, iqr: null, q1: null };
+
+        const median = this.computeQuantile(prices, 0.5);
+        const q1 = this.computeQuantile(prices, 0.25);
+        const q3 = this.computeQuantile(prices, 0.75);
+        const iqr = q3 - q1;
+        return { median, iqr, q1 };
+    }
+
 }

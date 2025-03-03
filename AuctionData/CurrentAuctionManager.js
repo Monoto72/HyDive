@@ -25,7 +25,9 @@ export class CurrentAuctionManager extends AuctionManagerBase {
 
         this.firstTime = true;
 
-        // Optionally schedule periodic updates (every minute)
+        // Number of threads to use for concurrent processing.
+        this.threads = 5;
+
         this.job = new CronJob('0 * * * * *', () => {
             this.updateAuctionCache();
         });
@@ -72,16 +74,14 @@ export class CurrentAuctionManager extends AuctionManagerBase {
     async updateAuctionCache() {
         try {
             console.time("updateAuctionCache");
-    
             const lastBaseline = this.previousLowestBinPrices;
-    
             this.rawStorage.dataByItem = {};
             this.auctionCache = [];
     
             if (!this.notifiedFlips) this.notifiedFlips = new Set();
     
             console.time("fetchPage1");
-            // Process page 1 and get return total pages.
+            // Process page 1 and get total pages.
             const firstPageData = await this.fetchCurrentAuctions(1);
             console.timeEnd("fetchPage1");
     
@@ -97,41 +97,37 @@ export class CurrentAuctionManager extends AuctionManagerBase {
                 this.firstTime = false;
             }
     
+            // Process page 1 auctions concurrently.
             console.time("processPage1");
-            // Loop over the first page auctions for real-time flips.
             for (const auction of firstPageData.auctions) {
                 const parsed = await this.parseAuction(auction);
                 if (!parsed) continue;
-    
+            
                 this.rawStorage.addAuction(parsed.itemName, parsed, parsed.attrKey, { limited: false });
                 aggregatedAuctions.push(parsed);
-    
-                // If we have previous lowest prices, check for a flip immediately.
-                if (lastBaseline) {
-                    let lowestPrice = lastBaseline[parsed.itemName];
-                    if (lowestPrice && typeof lowestPrice === "object") {
-                        lowestPrice = Math.min(...Object.values(lowestPrice));
-                    }
-    
+            
+
+                const { median, iqr, q1 } = this.endedManager.computeStats(parsed.itemName);
+                if (q1) {
                     if (
-                        lowestPrice &&
-                        parsed.auctionRecord.price < lowestPrice &&
-                        (lowestPrice - parsed.auctionRecord.price) >= minimumDifference &&
+                        parsed.auctionRecord.price < q1 &&
+                        (q1 - parsed.auctionRecord.price) >= minimumDifference && 
                         !this.notifiedFlips.has(parsed.auctionRecord.uuid)
                     ) {
-                        sendRelayMessage(this.getFlipEmbed(parsed, lowestPrice));
+                        sendRelayMessage(this.getFlipEmbed(parsed, q1, median, iqr));
+                        this.notifiedFlips.add(parsed.auctionRecord.uuid);
                     }
-                }
+                };
             }
+
             console.timeEnd("processPage1");
     
-
             const totalPages = firstPageData.totalPages - 1 || 1;
-            const limit = pLimit(5); // Cool ass multi-threading lib
+            const limit = pLimit(this.threads); // Limit concurrency for worker tasks.
             const workerPromises = [];
     
             console.time("workerPages");
-            // Send workers to work
+            // Dispatch worker tasks for pages 2 through totalPages.
             for (let page = 2; page <= totalPages; page++) {
                 workerPromises.push(
                     limit(async () => {
@@ -145,26 +141,23 @@ export class CurrentAuctionManager extends AuctionManagerBase {
                 );
             }
     
-            // Workers come home from a hard day at the coal mines
             const workerResultsArrays = await Promise.all(workerPromises);
-            workerResultsArrays.forEach((resultsArray) => {
+            workerResultsArrays.forEach(resultsArray => {
                 aggregatedAuctions = aggregatedAuctions.concat(resultsArray);
                 resultsArray.forEach(parsed => {
                     this.rawStorage.addAuction(parsed.itemName, parsed, parsed.attrKey, { limited: false });
-                    if (lastBaseline) {
-                        let lowestPrice = lastBaseline[parsed.itemName];
-                        if (lowestPrice && typeof lowestPrice === "object") {
-                            lowestPrice = Math.min(...Object.values(lowestPrice));
-                        }
+
+                    const { median, iqr, q1 } = this.endedManager.computeStats(parsed.itemName);
+                    if (q1) {
                         if (
-                            lowestPrice &&
-                            parsed.auctionRecord.price < lowestPrice &&
-                            (lowestPrice - parsed.auctionRecord.price) >= minimumDifference &&
+                            parsed.auctionRecord.price < q1 &&
+                            (q1 - parsed.auctionRecord.price) >= minimumDifference && 
                             !this.notifiedFlips.has(parsed.auctionRecord.uuid)
                         ) {
-                            sendRelayMessage(this.getFlipEmbed(parsed, lowestPrice));
+                            sendRelayMessage(this.getFlipEmbed(parsed, q1, median, iqr));
+                            this.notifiedFlips.add(parsed.auctionRecord.uuid);
                         }
-                    }
+                    };
                 });
             });
             console.timeEnd("workerPages");
@@ -174,9 +167,7 @@ export class CurrentAuctionManager extends AuctionManagerBase {
             console.log(`Current auction cache updated at ${this.lastUpdate} with ${aggregatedAuctions.length} auctions.`);
     
             console.time("updateBaseline");
-
             const newBaseline = this.getAllLowestBinPrices();
-            // console.log("New baseline computed:", newBaseline);
             this.previousLowestBinPrices = newBaseline;
             console.timeEnd("updateBaseline");
     
@@ -185,6 +176,7 @@ export class CurrentAuctionManager extends AuctionManagerBase {
             console.error("Error updating current auction cache:", error);
         }
     }
+    
 
     /**
      * Computes the lowest BIN price for an item.
@@ -263,24 +255,32 @@ export class CurrentAuctionManager extends AuctionManagerBase {
         return lowest;
     }
 
-    getFlipEmbed(auction, lowestPrice) {
+    getFlipEmbed(auction, benchmark, median, iqr) {
         return {
             title: `Real-time flip detected for ${auction.itemName}`,
-            description: `Auction price ${formatNumber(auction.auctionRecord.price)} vs. previous lowest BIN ${formatNumber(lowestPrice)}`,
+            description: `Auction price ${formatNumber(auction.auctionRecord.price)} vs. benchmark ${formatNumber(benchmark)}`,
             color: 0xA020F0,
-            footer: {
-                text: `📅 test`,
-            },
+            timestamp: new Date().toISOString(),
             fields: [
                 {
                     name: "Profit",
-                    value: `${formatNumber(lowestPrice - auction.auctionRecord.price)}`,
+                    value: `${formatNumber(benchmark - auction.auctionRecord.price)}`,
+                },
+                {
+                    name: "Median Price",
+                    value: `${formatNumber(median)}`,
+                    inline: true
+                },
+                {
+                    name: "IQR",
+                    value: `${formatNumber(iqr)}`,
+                    inline: true
                 },
                 {
                     name: "View Auction",
                     value: `\`/viewauction ${auction.auctionRecord.uuid}\``
                 }
             ],
-        }
+        };
     }
 }

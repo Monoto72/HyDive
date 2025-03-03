@@ -1,6 +1,6 @@
 export const sendRelayMessage = async (relayMessage) => {
     console.log("Sending relay message:", relayMessage);
-    return fetch("https://discord.com/api/webhooks/1345886126283427850/z8WQnV1NTzFH64hsl-JLo3jF6f9BqeROen8xbrDTLqN3-HjJEGKBtvfRLKW0Z-khvrRS", { 
+    return fetch("", { 
         method: "POST",
         headers: {
             "Content-Type": "application/json",
