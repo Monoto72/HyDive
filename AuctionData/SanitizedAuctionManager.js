@@ -14,15 +14,15 @@ export class SanitizedAuctionManager {
     getSanitizedAuctions(itemName, extraParams) {
         // Get current auctions for the item.
         const currentAuctions = this.currentManager.rawStorage.getAuctions(itemName);
-        console.log(`Found ${JSON.stringify(currentAuctions)} current auctions for ${itemName}`);
         if (!currentAuctions) return null;
     
         let enrichedAuctions;
     
-        // Normalize search term if provided.
-        let searchAttr = extraParams && extraParams.attributes
-            ? extraParams.attributes.toUpperCase().trim()
+        // Normalize search term if provided. -- e.g., "magic find" -> "MAGIC_FIND"
+        let searchAttr = extraParams && (extraParams.attribute || extraParams.attributes)
+            ? (extraParams.attribute || extraParams.attributes).toUpperCase().trim()
             : null;
+
         if (searchAttr) {
             searchAttr = searchAttr.replace(/\s+/g, '+');
         }
@@ -31,15 +31,15 @@ export class SanitizedAuctionManager {
         if (typeof currentAuctions === 'object' && !Array.isArray(currentAuctions)) {
             enrichedAuctions = {};
             for (const bucketKey in currentAuctions) {
+                // Remove numeric level details from the bucket key. - "MAGIC_FIND;10+VETERAN;10" becomes "MAGIC_FIND+VETERAN".
+                const sanitizedBucketKey = bucketKey.replace(/;\d+/g, '');
                 // If a search term is provided, skip buckets that don't match.
-                if (searchAttr && !bucketKey.includes(searchAttr)) {
+                if (searchAttr && !sanitizedBucketKey.includes(searchAttr)) {
                     continue;
                 }
                 const bucket = currentAuctions[bucketKey];
-                console.log(`Processing bucket "${bucketKey}" with ${bucket.length} auctions`);
-                const total = bucket.reduce((sum, a) => sum + a.price, 0);
-                const avgPrice = bucket.length ? total / bucket.length : null;
-
+                const avgPrice = bucket.map(a => a.auctionRecord.price).reduce((sum, p) => sum + p, 0) / bucket.length || "Null";
+    
                 const enhancedAuctions = bucket.map(a => {
                     console.log(a);
                     return {
@@ -47,7 +47,7 @@ export class SanitizedAuctionManager {
                         price: a.auctionRecord && a.auctionRecord.price ? a.auctionRecord.price : 0,
                     };
                 });
-
+    
                 enrichedAuctions[bucketKey] = {
                     auctions: enhancedAuctions,
                     avgPrice
@@ -65,7 +65,7 @@ export class SanitizedAuctionManager {
             };
         }
     
-        // Optionally, compute an overall average (across all buckets).
+        // Optionally, should we need to, include the overall average price for the item regardless of extraAtrrs.
         const overallAvg = this.endedManager.computeAvgPrice(itemName);
     
         return {
@@ -73,6 +73,7 @@ export class SanitizedAuctionManager {
             overallAvg
         };
     }
+    
 
     /**
      * Returns auctions for all items that contain the specified attribute at the given level.
@@ -82,60 +83,102 @@ export class SanitizedAuctionManager {
      * @param {boolean} onwards - If true, includes all buckets where the attribute level is >= requested level.
      * @returns {Object} An object with all auctions matching the attribute and level on onwards.
     */
-    getAuctionsByAttribute(attribute, level, onwards = false) {
-        const results = {};
+    getAuctionsByAttribute(attribute, level, piece = null, onwards = false, shard = false) {
         const allItems = this.currentManager.rawStorage.dataByItem;
         const reqAttr = attribute.toUpperCase().trim();
         const reqLevel = parseFloat(level);
-        console.log(`Searching for attribute ${reqAttr} at level ${reqLevel}${onwards ? " and upwards" : ""}`);
-
+    
+        // Mapping of Kuudra pieces to prefixes. ?piece=kuudra_boots -> [aurora_boots, fervor_boots, ...]
+        const types = ["boots", "leggings", "chestplate", "helmet"];
+        const prefixes = ["aurora", "fervor", "crimson", "hollow", "terror"];
+        
+        const kuudraMapping = Object.fromEntries(
+            types.map(type => [
+                `kuudra_${type}`,
+                prefixes.map(prefix => `${prefix}_${type}`)
+            ])
+        );
+        
+    
+        let allowedPieces = null;
+        let exactPiece = null;
+        if (piece) {
+            const pieceLower = piece.toLowerCase();
+            if (kuudraMapping[pieceLower]) {
+                allowedPieces = kuudraMapping[pieceLower].map(p => p.toLowerCase());
+            } else {
+                exactPiece = pieceLower;
+            }
+        }
+    
+        const aggregatedAuctions = [];
+        let totalPrice = 0;
+        let totalCount = 0;
+    
         for (const itemName in allItems) {
             const buckets = allItems[itemName];
             for (const bucketKey in buckets) {
-                // MAKE THE GODAMMN KEY "MAGIC_FIND;5+MENDING;4"
                 const segments = bucketKey.split('+');
                 let matched = false;
-                for (const segment of segments) {
-                    const parts = segment.split(';');
+                let matchedLevel = null;
+
+                for (let i = 0; i < segments.length; i++) {
+                    const parts = segments[i].split(';');
                     if (parts.length !== 2) continue;
                     const attr = parts[0].toUpperCase().trim();
                     const lvl = parseFloat(parts[1]);
-                    console.log(`Item ${itemName}, bucket "${bucketKey}": segment "${segment}" -> attr: ${attr}, lvl: ${lvl}`);
                     if (attr === reqAttr) {
-                        if (onwards) {
-                            if (lvl >= reqLevel) {
-                                console.log(`  --> Matched (onwards): ${lvl} >= ${reqLevel}`);
-                                matched = true;
-                            } else {
-                                console.log(`  --> Not matched (onwards): ${lvl} < ${reqLevel}`);
-                            }
-                        } else {
-                            if (lvl === reqLevel) {
-                                console.log(`  --> Matched (exact): ${lvl} === ${reqLevel}`);
-                                matched = true;
-                            } else {
-                                console.log(`  --> Not matched (exact): ${lvl} !== ${reqLevel}`);
-                            }
+                        if (onwards ? (lvl >= reqLevel) : (lvl === reqLevel)) {
+                            matched = true;
+                            matchedLevel = lvl;
+                            break;
                         }
-                        if (matched) break;
                     }
                 }
+
                 if (matched) {
-                    if (!results[itemName]) {
-                        results[itemName] = {};
-                    }
                     const bucket = buckets[bucketKey];
-                    const total = bucket.reduce((sum, a) => sum + a.price, 0);
-                    const avgPrice = bucket.length ? total / bucket.length : null;
-                    results[itemName][bucketKey] = {
-                        auctions: bucket,
-                        avgPrice
-                    };
+                    for (let j = 0; j < bucket.length; j++) {
+                        const auction = bucket[j];
+                        
+                        if (piece) {
+                            console.log(auction);
+                            const auctionPiece = auction.auctionRecord?.piece || auction.itemName;
+                            if (!auctionPiece) continue;
+                            const auctionPieceLower = auctionPiece.toLowerCase();
+                            // Ultimately, we want to filter by the exact piece and/ or include shards.
+                            if (shard && auctionPieceLower === "attribute_shard") {
+                            } else if (allowedPieces) {
+                                if (!allowedPieces.includes(auctionPieceLower)) {
+                                    continue;
+                                }
+                            } else if (exactPiece) {
+                                if (auctionPieceLower !== exactPiece) {
+                                    continue;
+                                }
+                            }
+                        }
+                        
+                        const price = auction.auctionRecord?.price || 0;
+                        aggregatedAuctions.push({
+                            uuid: auction.auctionRecord?.uuid || "",
+                            price,
+                            level: matchedLevel
+                        });
+                        totalPrice += price;
+                        totalCount++;
+                    }
                 }
             }
         }
-        return results;
+        
+        // Sort auctions by price. Level is not guaranteed to be sorted. ?onwards=false
+        aggregatedAuctions.sort((a, b) => a.price - b.price);
+        const avgPrice = totalCount ? totalPrice / totalCount : null;
+    
+        return { auctions: aggregatedAuctions, avgPrice };
     }
+    
 
     
     /**
@@ -152,38 +195,37 @@ export class SanitizedAuctionManager {
      * @returns 
      */
     getSanitizedPetAuctions(extraParams = {}) {
-        // Optional filters; if not provided, we don't filter by that field.
         const reqRarity = extraParams.rarity ? extraParams.rarity.toUpperCase().trim() : null;
         const reqName = extraParams.name ? extraParams.name.toUpperCase().trim() : null;
-        const reqLevel = extraParams.level ? parseFloat(extraParams.level) : 80;
+        // Only parse reqLevel if provided; otherwise, leave as null.
+        const reqLevel = extraParams.level ? parseFloat(extraParams.level) : null;
         const filterCandied = extraParams.candied === 'true';
-
-        // Retrieve pet auctions stored under "PETS"
+    
         const petAuctions = this.currentManager.rawStorage.getAuctions("PETS");
         if (!petAuctions) {
             console.log("No pet auctions found");
             return null;
         }
-
+    
         const enriched = {};
-
+    
         for (const bucketKey in petAuctions) {
             if (reqRarity && !bucketKey.startsWith(reqRarity + "_")) continue;
             if (reqName && !bucketKey.includes(reqName)) continue;
-
+    
             const parts = bucketKey.split(";");
             if (parts.length !== 2) continue;
             const bucketRange = parts[1].trim();
-
+    
             let bucketMatches = false;
-            if (bucketRange.includes("-")) {
-                // Allow user to query by level range like "81-99" or even "42"
+            // If reqLevel is not provided, we assume the bucket should match without a level filter.
+            if (reqLevel === null) {
+                bucketMatches = true;
+            } else if (bucketRange.includes("-")) {
                 const [low, high] = bucketRange.split("-").map(Number);
                 if (reqLevel >= low && reqLevel <= high) {
                     bucketMatches = true;
                 }
-            } else if (bucketRange.toUpperCase() === "SPECIAL") {
-                bucketMatches = true;
             } else {
                 const bucketNum = parseFloat(bucketRange);
                 if (bucketNum === reqLevel) {
@@ -191,35 +233,31 @@ export class SanitizedAuctionManager {
                 }
             }
             if (!bucketMatches) continue;
-
+    
             let bucket = petAuctions[bucketKey];
             if (filterCandied) {
                 bucket = bucket.filter(a => a.petInfo && parseFloat(a.petInfo.candyUsed) > 0);
             }
             if (bucket.length === 0) continue;
-
-            // Enhance each auction with pet level and filters to ensure the user doesn't buy a wrong level and/ or candied pet.
-            const enhancedAuctions = bucket.map(a => {
-                // console.log(a);
-                return {
-                    uuid: a.auctionRecord && a.auctionRecord.uuid ? a.auctionRecord.uuid : "",
-                    price: a.auctionRecord && a.auctionRecord.price ? a.auctionRecord.price : 0,
-                    petLevel: a.petInfo ? a.petInfo.petLevel : null,
-                    isCandied: a.petInfo ? a.petInfo.isCandied : false
-                };
-            });
-
+    
+            const enhancedAuctions = bucket.map(a => ({
+                uuid: a.auctionRecord && a.auctionRecord.uuid ? a.auctionRecord.uuid : "",
+                price: a.auctionRecord && a.auctionRecord.price ? a.auctionRecord.price : 0,
+                petLevel: a.petInfo ? a.petInfo.petLevel : null,
+                isCandied: a.petInfo ? a.petInfo.isCandied : false
+            }));
+    
             const total = bucket.reduce((sum, a) => {
                 return sum + (a.auctionRecord && a.auctionRecord.price ? a.auctionRecord.price : 0);
             }, 0);
-
+    
             const avgPrice = bucket.length ? total / bucket.length : null;
             enriched[bucketKey] = {
                 auctions: enhancedAuctions,
                 avgPrice
             };
         }
-
+    
         const overallAvg = this.endedManager.computeAvgPrice("PETS");
         return {
             auctions: enriched,

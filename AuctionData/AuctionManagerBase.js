@@ -1,6 +1,6 @@
 import axios from 'axios';
 import NBT from 'prismarine-nbt';
-import { getPetBucket, computePetLevel } from '../helpers/petUtils.js'; // adjust the path as needed
+import { getPetBucket } from '../helpers/petUtils.js'; // adjust the path as needed
 
 export class AuctionManagerBase {
     async fetchAuctions(url) {
@@ -64,13 +64,17 @@ export class AuctionManagerBase {
                 console.error(`Error parsing petInfo for auction ${auction.uuid}:`, e);
                 return null;
             }
-    
-            const petBucket = getPetBucket(petInfo);
-            const petLevel = computePetLevel(petInfo);
+
+            const petName = itemInfo.tag.value.display.value.Name.value;
+            const petLevelMatch = petName.match(/\[\s*Lvl\s*(\d+)\s*\]/i);
+            const petLevel = petLevelMatch ? parseInt(petLevelMatch[1], 10) : 0;
+
+            const petBucket = getPetBucket(petInfo.type, petInfo.tier, petLevel);
+
             const isCandied = petInfo.candyUsed && parseFloat(petInfo.candyUsed) > 0; // Fucking phycopaths
 
             return {
-                itemName: "PETS",
+                itemName: 'PETS',
                 auctionRecord,
                 attrKey: petBucket,
                 petInfo: {
@@ -86,12 +90,17 @@ export class AuctionManagerBase {
         if (extraAttrs.attributes) {
             const attrs = extraAttrs.attributes.value;
             const attrEntries = Object.entries(attrs).map(([attr, attrData]) => {
-                return `${attr.toUpperCase()};${String(attrData.value).trim()}`;
+                attr = attr.toUpperCase() === 'MENDING' ? 'VITALITY' : attr;
+                let value = String(attrData.value).trim();
+                value = value.toUpperCase() === 'MENDING' ? 'VITALITY' : value;
+                return `${attr.toUpperCase()};${value}`;
             });
             const attrKey = attrEntries.sort().join('+');
             return {
                 itemName: itemNameOriginal,
                 auctionRecord,
+                // Potentially add the tier and change how the bucket works for kuudra pieces
+                // Add star level
                 attrKey
             };
         } else {

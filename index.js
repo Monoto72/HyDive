@@ -1,24 +1,12 @@
 import express from 'express';
-import {
-    EndedAuctionManager
-} from './AuctionData/EndedAuctionManager.js';
-import {
-    CurrentAuctionManager
-} from './AuctionData/CurrentAuctionManager.js';
-import {
-    SanitizedAuctionManager
-} from './AuctionData/SanitizedAuctionManager.js';
+import { EndedAuctionManager } from './AuctionData/EndedAuctionManager.js';
+import { CurrentAuctionManager } from './AuctionData/CurrentAuctionManager.js';
+import { SanitizedAuctionManager } from './AuctionData/SanitizedAuctionManager.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 let endedManager, currentManager, auctionManager;
-
-// I accidently beutified the code, so it looks very bad. I'm sorry.
-// I will fix it
-// I will fix it x2
-// I will fix it x3
-// I will fix it x4
 
 (async () => {
     try {
@@ -42,106 +30,103 @@ let endedManager, currentManager, auctionManager;
     }
 })();
 
-// Routes remain the same.
-// GET /auctions/current/ENDERMAN?pet=true&rarity=LEGENDARY&level=80&candied=false
-app.get('/auctions/current/:itemName', (req, res) => {
-    const {
-        itemName
-    } = req.params;
-
-    if (itemName === 'PETS') {
-        console.log('Searching for pet auctions...');
-        const result = auctionManager.getSanitizedPetAuctions({
-            rarity: req.query.rarity,
-            name: req.query.name, // Use 'name' to filter pet type
-            level: req.query.level, // optional; defaults to 80 in our method
-            candied: req.query.candied
-        });
-        if (!result) {
-            return res.status(404).json({
-                error: 'No pet auctions found for that search'
-            });
-        }
-        return res.json(result);
+/**
+ * GET /auctions/items
+ * Returns auctions for all items.
+ */
+app.get('/auctions/items', (req, res) => {
+    // Assuming currentManager.rawStorage.dataByItem holds all items grouped by itemName.
+    const allItems = currentManager.rawStorage.dataByItem;
+    if (!allItems) {
+        return res.status(404).json({ error: 'No item auctions found' });
     }
+    res.json(allItems);
+});
 
-    // Otherwise, use the normal auction search.
+/**
+ * GET /auctions/items/:itemName
+ * Query parameters: attributes
+ * Returns auctions for a specific item along with its average price.
+ */
+app.get('/auctions/items/:itemName', (req, res) => {
+    const { itemName } = req.params;
     const result = auctionManager.getSanitizedAuctions(itemName, req.query);
     if (!result) {
-        return res.status(404).json({
-            error: 'No current auctions found for that item'
-        });
+        return res.status(404).json({ error: `No current auctions found for ${itemName}` });
     }
     res.json(result);
 });
 
-
-app.get('/auctions/raw', (req, res) => {
-    if (!currentManager) {
-        return res.status(503).json({
-            error: 'Current manager not initialized'
-        });
-    }
-    const result = currentManager.rawStorage;
+/**
+ * GET /auctions/pets
+ * Query parameters: rarity, name, level, candied
+ * Returns pet auctions with optional filters.
+ */
+app.get('/auctions/pets', (req, res) => {
+    const result = auctionManager.getSanitizedPetAuctions({
+        rarity: req.query.rarity,
+        name: req.query.name,
+        level: req.query.level,
+        candied: req.query.candied,
+    });
     if (!result) {
-        return res.status(404).json({
-            error: 'No current auctions found'
-        });
+        return res.status(404).json({ error: 'No pet auctions found for that search' });
     }
     res.json(result);
 });
 
+/**
+ * GET /auctions/averages
+ * Returns overall average prices from ended auctions.
+ */
 app.get('/auctions/averages', (req, res) => {
     if (!endedManager || typeof endedManager.getAllAverages !== 'function') {
-        return res.status(501).json({
-            error: 'Endpoint not implemented'
-        });
+        return res.status(501).json({ error: 'Endpoint not implemented' });
     }
     const averages = endedManager.getAllAverages();
     res.json(averages);
 });
 
-app.get('/auctions/attribute/:attribute', (req, res) => {
-    if (!auctionManager) {
-        return res.status(503).json({
-            error: 'Auction manager not initialized'
-        });
+/**
+ * GET /auctions/averages/:itemName
+ * Returns the average price for a specific item.
+ */
+app.get('/auctions/averages/:itemName', (req, res) => {
+    const { itemName } = req.params;
+    const overallAvg = endedManager.computeAvgPrice(itemName);
+    if (overallAvg === null || overallAvg === undefined) {
+        return res.status(404).json({ error: `No average found for ${itemName}` });
     }
-    const {
-        attribute
-    } = req.params;
-    const {
-        level,
-        onwards
-    } = req.query;
-    if (!level) {
-        return res.status(400).json({
-            error: 'Query parameter "level" is required'
-        });
-    }
-    const onwardsFlag = (onwards === 'true' || onwards === true);
-
-    const results = auctionManager.getAuctionsByAttribute(attribute, level, onwardsFlag);
-    if (!results || Object.keys(results).length === 0) {
-        return res.status(404).json({
-            error: 'No auctions found for that attribute and level'
-        });
-    }
-    res.json(results);
+    res.json({ item: itemName, overallAvg });
 });
 
-// GET /auctions/pets
-app.get('/auctions/pets', (req, res) => {
-    if (!currentManager || !currentManager.rawStorage) {
-        return res.status(503).json({
-            error: 'Current manager not initialized'
-        });
+/**
+ * GET /auctions/lowestbin
+ * Returns the lowest BIN auction for each item.
+ */
+app.get('/auctions/lowestbin', (req, res) => {
+    const lowestBins = currentManager.getAllLowestBinPrices();
+    if (!lowestBins || Object.keys(lowestBins).length === 0) {
+        return res.status(404).json({ error: 'No lowest BIN auctions found' });
     }
-    const petsAuctions = currentManager.rawStorage.getAuctions("PETS");
-    if (!petsAuctions) {
-        return res.status(404).json({
-            error: 'No pet auctions found'
-        });
+    res.json(lowestBins);
+});
+
+/**
+ * GET /auctions/attribute/:attribute
+ * Query parameters: level, onwards, piece, shard
+ * Returns auctions filtered by the given attribute and level.
+ */
+app.get('/auctions/attribute/:attribute', (req, res) => {
+    const { attribute } = req.params;
+    const { level, onwards, piece, shard } = req.query;
+    if (!level) {
+        return res.status(400).json({ error: 'Query parameter "level" is required' });
     }
-    res.json(petsAuctions);
+    const onwardsFlag = (onwards === 'true' || onwards === true);
+    const results = auctionManager.getAuctionsByAttribute(attribute, level, piece, onwardsFlag, shard);
+    if (!results || Object.keys(results).length === 0) {
+        return res.status(404).json({ error: 'No auctions found for that attribute and level' });
+    }
+    res.json(results);
 });
